@@ -26,7 +26,9 @@ def _():
     import matplotlib.patches as patches
 
 
-    data = np.load("model.npz")
+   
+    data_path = mo.notebook_location() / "public" / "model.npz"
+    data = np.load(data_path)
 
     params = {
         'anchors': data['anchors'],

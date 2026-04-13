@@ -10,10 +10,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "numpy>=2.4.4",
     "optax>=0.2.8",
-    "pandas>=3.0.2",
-    "rieoptax",
     "scikit-learn>=1.8.0",
-    "yfinance>=1.2.1",
 ]
 
 [tool.uv.sources]

@@ -1,0 +1,20 @@
+[project]
+name = "rkhs-sheaf"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jax>=0.9.2",
+    "marimo>=0.23.0",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.4",
+    "optax>=0.2.8",
+    "pandas>=3.0.2",
+    "rieoptax",
+    "scikit-learn>=1.8.0",
+    "yfinance>=1.2.1",
+]
+
+[tool.uv.sources]
+rieoptax = { git = "https://github.com/SaitejaUtpala/rieoptax.git" }

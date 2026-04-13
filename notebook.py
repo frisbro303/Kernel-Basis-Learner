@@ -25,8 +25,6 @@ def _():
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
 
-    import io  # Add this import
-
 
     data = np.load("model.npz")
 

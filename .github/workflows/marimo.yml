@@ -28,7 +28,7 @@ jobs:
 
       - name: 📄 Export notebook and copy data
         run: |
-          marimo export html-wasm notebook.py -o dist --mode run --show-code
+          marimo export html-wasm notebook.py -o dist --mode edit --show-code
           mkdir -p dist/public
           cp model.npz dist/public
 

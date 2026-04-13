@@ -28,7 +28,7 @@ jobs:
 
       - name: 📄 Export notebook
         run: |
-          marimo export html-wasm kernel_basis_learner.py -o dist --mode run --show-code
+          marimo export html-wasm notebook.py -o dist --mode run --show-code
 
       - name: 📦 Upload Pages Artifact
         uses: actions/upload-pages-artifact@v3

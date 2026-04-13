@@ -25,15 +25,12 @@ def _():
         'L_params': data['L_params']
     }
 
-    # 2. Reconstruct the basis (NumPy version)
     def compute_basis_np(coords, anchors, mixing_weights, L_params):
         l11, l21, l22 = L_params[:, 0], L_params[:, 1], L_params[:, 2]
     
-        # coords: (P, 2), anchors: (M, 2)
         diff = coords[:, np.newaxis, :] - anchors[np.newaxis, :, :] # (P, M, 2)
         dx, dy = diff[..., 0], diff[..., 1]
 
-        # Transform by L^T
         v1 = l11[np.newaxis, :] * dx + l21[np.newaxis, :] * dy
         v2 = l22[np.newaxis, :] * dy
         dist_sq = v1**2 + v2**2

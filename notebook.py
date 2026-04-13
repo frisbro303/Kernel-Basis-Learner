@@ -28,12 +28,7 @@ def _():
     import io  # Add this import
 
 
-    model_path = mo.notebook_location() / "model.npz"
-
-    # Use a buffer to bridge the WASM file system and numpy
-    with open(model_path, "rb") as f:
-        buffer = io.BytesIO(f.read())
-        data = np.load(buffer)
+    data = np.load("model.npz")
 
     params = {
         'anchors': data['anchors'],

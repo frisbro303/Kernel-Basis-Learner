@@ -24,8 +24,7 @@ jobs:
 
       - name: 📦 Install dependencies
         run: |
-          pip install marimo
-          # Add any other packages your notebook needs here
+          pip install .
 
       - name: 📄 Export notebook
         run: |

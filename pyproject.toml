@@ -1,5 +1,5 @@
 [project]
-name = "rkhs-sheaf"
+name = "Kernel-Basis-Learner"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -12,6 +12,3 @@ dependencies = [
     "optax>=0.2.8",
     "scikit-learn>=1.8.0",
 ]
-
-[tool.uv.sources]
-rieoptax = { git = "https://github.com/SaitejaUtpala/rieoptax.git" }

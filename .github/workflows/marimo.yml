@@ -28,12 +28,9 @@ jobs:
 
       - name: 📄 Export notebook and copy data
         run: |
-          # Create the dist folder first
-          mkdir -p dist
-          # Export the notebook
           marimo export html-wasm notebook.py -o dist --mode run --show-code
-          # Copy the model file into the dist folder so it's hosted alongside the HTML
-          cp model.npz dist/
+          mkdir -p dist/public
+          cp model.npz dist/public
 
       - name: 📦 Upload Pages Artifact
         uses: actions/upload-pages-artifact@v3

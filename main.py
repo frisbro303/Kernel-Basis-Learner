@@ -23,105 +23,276 @@ def _(mo):
 def _():
     import jax
     import jax.numpy as jnp
-    from jax import vmap, jit, random, tree_util
+    from jax import jit, random, value_and_grad
     import optax
     import matplotlib.pyplot as plt
+    from sklearn.datasets import fetch_olivetti_faces
 
+    # --- 1. Parameters ---
+    N_BASIS = 256        # Number of basis functions
+    M_ANCHORS = 512      # Shared landmarks
+    BATCH_SIZE = 400     # Using full batch for smoother convergence
+    STEPS = 15001
+    LEARNING_RATE = 5e-3 
 
-    # --- 1. Model Definition ---
-    def init_phi_params(rng, layers=[1, 64, 64, 1]):
-        params = []
-        for in_dim, out_dim in zip(layers[:-1], layers[1:]):
-            k1, k2 = random.split(rng)
-            params.append({
-                'w': random.normal(k1, (in_dim, out_dim)) * jnp.sqrt(2/in_dim),
-                'b': jnp.zeros((out_dim,))
-            })
-            rng = k2
-        return params
+    # --- 2. Data Preparation ---
+    faces_data = fetch_olivetti_faces()
+    Y_obs = jnp.array(faces_data.images).reshape(400, -1)
+    Y_obs = (Y_obs - Y_obs.min()) / (Y_obs.max() - Y_obs.min())
 
-    def phi_forward(params, x):
-        # Standard MLP forward pass
-        activation = x
-        for layer in params[:-1]:
-            activation = jax.nn.tanh(jnp.dot(activation, layer['w']) + layer['b'])
-        return jnp.dot(activation, params[-1]['w']) + params[-1]['b']
-
-    # Vectorization Strategy:
-    # 1. Map a single model over a batch of X inputs
-    batch_phi = vmap(phi_forward, in_axes=(None, 0))
-    # 2. Map the entire collection of models over the same batch of X
-    # in_axes=(0, None) -> map over the 'n_eigen' dimension of stacked params
-    multi_phi = vmap(batch_phi, in_axes=(0, None))
-
-    # --- 2. Loss Function ---
-    def loss_fn(all_params, c, x_obs, y_obs, x_domain):
-        # phis shape: (n_eigen, batch_size)
-        phis_obs = multi_phi(all_params, x_obs).squeeze()
-        y_pred = jnp.dot(c, phis_obs)
-        data_loss = jnp.mean((y_obs - y_pred)**2)
-
-        # Orthogonality on the global domain RR via sampling
-        phis_dom = multi_phi(all_params, x_domain).squeeze()
-        n_samples = x_domain.shape[0]
-        # gram[i, j] = average(phi_i * phi_j)
-        gram = jnp.dot(phis_dom, phis_dom.T) / n_samples
-        ortho_loss = jnp.mean((gram - jnp.eye(n_eigen))**2)
-
-        return data_loss + 2.0 * ortho_loss
-
-    # --- 3. Initialization and Training ---
-    n_eigen = 8
-    key = random.PRNGKey(42)
-    k_params, k_data, k_train = random.split(key, 3)
-
-    # FIX: Stack independent parameters into a single PyTree of Arrays
-    list_of_params = [init_phi_params(k) for k in random.split(k_params, n_eigen)]
-    all_params = tree_util.tree_map(lambda *args: jnp.stack(args), *list_of_params)
-    c = jnp.ones(n_eigen) / n_eigen
-
-    # Synthetic Data
-    x_obs = jnp.linspace(-3, 3, 50).reshape(-1, 1)
-    y_obs = (jnp.sin(x_obs) + 0.5 * jnp.cos(2.5 * x_obs)).flatten()
-
-    optimizer = optax.adam(1e-3)
-    opt_state = optimizer.init((all_params, c))
+    x_range = jnp.linspace(-1, 1, 64)
+    coords = jnp.stack(jnp.meshgrid(x_range, x_range, indexing='ij'), axis=-1).reshape(-1, 2)
 
     @jit
-    def train_step(all_params, c, opt_state, x_obs, y_obs, x_domain):
-        loss, grads = jax.value_and_grad(loss_fn, argnums=(0, 1))(all_params, c, x_obs, y_obs, x_domain)
-        updates, opt_state = optimizer.update(grads, opt_state)
-        all_params, c = optax.apply_updates((all_params, c), updates)
-        return all_params, c, opt_state, loss
-
-    for i in range(3001):
-        k_train, subkey = random.split(k_train)
-        # Global sampling across RR to learn the continuous basis
-        x_domain = random.normal(subkey, (400, 1)) * 5.0
+    def compute_basis(coords, anchors, mixing_weights, L_params):
+        """
+        Anisotropic Basis: exp(-0.5 * (x-z).T @ (L @ L.T) @ (x-z))
+        L_params: (M, 3) representing [l11, l21, l22] of lower-triangular L
+        """
+        l11, l21, l22 = L_params[:, 0], L_params[:, 1], L_params[:, 2]
     
-        all_params, c, opt_state, loss = train_step(all_params, c, opt_state, x_obs, y_obs, x_domain)
-        if i % 1000 == 0: print(f"Step {i}, Loss: {loss:.6f}")
+        diff = coords[:, None, :] - anchors[None, :, :]  # (P, M, 2)
+        dx, dy = diff[..., 0], diff[..., 1]
+    
+        # Transform coordinates by L^T
+        v1 = l11[None, :] * dx + l21[None, :] * dy
+        v2 = l22[None, :] * dy
+        dist_sq = v1**2 + v2**2
+    
+        # Gaussian Kernel + Linear Mixing
+        K_pixels_anchors = jnp.exp(-0.5 * dist_sq)
+        phis = K_pixels_anchors @ mixing_weights
+    
+        # Unit norm normalization
+        return phis / (jnp.linalg.norm(phis, axis=0, keepdims=True) + 1e-6)
 
-    # --- 4. Plotting Results ---
-    x_test = jnp.linspace(-10, 10, 600).reshape(-1, 1)
-    phis_test = multi_phi(all_params, x_test).squeeze()
-    y_final = jnp.dot(c, phis_test)
+    @jit
+    def fast_solve(Phi, Y_batch, reg=1e-5):
+        n_basis = Phi.shape[1]
+        lhs = Phi.T @ Phi + reg * jnp.eye(n_basis)
+        rhs = Phi.T @ Y_batch.T
+        L = jnp.linalg.cholesky(lhs)
+        m_n = jax.scipy.linalg.cho_solve((L, True), rhs).T
+        return m_n
 
-    plt.figure(figsize=(14, 5))
-    plt.subplot(1, 2, 1)
-    for k in range(n_eigen):
-        plt.plot(x_test, phis_test[k], label=f'$\phi_{k}(x)$')
-    plt.axvspan(-3, 3, color='gray', alpha=0.1, label='Data Region')
-    plt.title("Independent Eigenfunctions over RR")
-    plt.legend()
+    def init_params(rng):
+        k1, k2, k3, k4 = random.split(rng, 4)
+        # Randomize initial widths/heights so they aren't perfect circles
+        # Scale between 15.0 and 25.0
+        l11_init = random.uniform(k3, (M_ANCHORS, 1), minval=15.0, maxval=25.0)
+        l22_init = random.uniform(k4, (M_ANCHORS, 1), minval=15.0, maxval=25.0)
+        l21_init = jnp.zeros((M_ANCHORS, 1)) 
+    
+        init_l = jnp.concatenate([l11_init, l21_init, l22_init], axis=1)
+    
+        return {
+            'anchors': random.uniform(k1, (M_ANCHORS, 2), minval=-0.8, maxval=0.8),
+            'mixing_weights': random.normal(k2, (M_ANCHORS, N_BASIS)) * 0.1,
+            'L_params': init_l
+        }
 
-    plt.subplot(1, 2, 2)
-    plt.scatter(x_obs, y_obs, color='black', s=10, label='Data')
-    plt.plot(x_test, y_final, color='red', lw=2, label='Global Reconstruction')
-    plt.title("Reconstruction in the Learned RKHS")
-    plt.legend()
+
+    @jit
+    def total_variation(y_img):
+        """Calculates the Total Variation of a 2D image."""
+        # y_img shape: (64, 64)
+        diff_h = jnp.abs(y_img[1:, :] - y_img[:-1, :])
+        diff_v = jnp.abs(y_img[:, 1:] - y_img[:, :-1])
+        return jnp.mean(diff_h) + jnp.mean(diff_v)
+
+    @jit
+    def train_step(params, opt_state, y_batch, coords):
+        def loss_fn(p):
+            phis = compute_basis(coords, p['anchors'], p['mixing_weights'], p['L_params'])
+            m_n = fast_solve(phis, y_batch)
+            y_pred = m_n @ phis.T
+        
+            # L2 Reconstruction Loss
+            recon_loss = jnp.mean((y_batch - y_pred)**2)
+        
+            # Total Variation Loss (reshaped to image dimensions)
+            y_pred_imgs = y_pred.reshape(-1, 64, 64)
+            tv_loss = jnp.mean(jax.vmap(total_variation)(y_pred_imgs))
+        
+            # Orthogonality constraint
+            ortho_loss = jnp.mean((phis.T @ phis - jnp.eye(N_BASIS))**2)
+        
+            # Weighted Total Loss
+            # lambda_tv usually ranges from 1e-4 to 1e-2
+            return recon_loss + 0.01 * ortho_loss + 1e-2 * tv_loss
+
+        loss, grads = value_and_grad(loss_fn)(params)
+        updates, opt_state = optimizer.update(grads, opt_state)
+        return optax.apply_updates(params, updates), opt_state, loss
+
+
+    # --- 4. Execution ---
+    rng = random.PRNGKey(42)
+    params = init_params(rng)
+
+    # 1. Define your separate optimizers
+    # We give L_params a 10x higher learning rate to encourage stretching
+    optimizers = {
+        'fast': optax.adam(LEARNING_RATE * 5),
+        'standard': optax.adam(LEARNING_RATE)
+    }
+
+    # 2. Create a "mask" that matches your params structure
+    # This tells Optax which optimizer to use for which key
+    param_labels = {
+        'anchors': 'standard',
+        'mixing_weights': 'standard',
+        'L_params': 'fast'  # Use the high learning rate here
+    }
+
+    # 3. Combine them
+    optimizer = optax.multi_transform(optimizers, param_labels)
+
+    opt_state = optimizer.init(params)
+
+    print("Training Anisotropic Model...")
+    for i in range(STEPS):
+        rng, subk = random.split(rng)
+        idx = random.choice(subk, 400, shape=(BATCH_SIZE,))
+        params, opt_state, loss = train_step(params, opt_state, Y_obs[idx], coords)
+    
+        if i % 500 == 0:
+            print(f"Step {i:4d} | Loss: {loss:.6f}")
+
+    # Final inference
+    phis = compute_basis(coords, params['anchors'], params['mixing_weights'], params['L_params'])
+    m_all = fast_solve(phis, Y_obs)
+    Y_reconstructed = m_all @ phis.T
+
+    # --- 5. Visualization ---
+    fig, axes = plt.subplots(1, 5, figsize=(15, 3))
+    for i in range(5):
+        axes[i].imshow(phis[:, i].reshape(64, 64), cmap='RdBu_r')
+        axes[i].set_title(f"Basis {i}")
+        axes[i].axis('off')
     plt.show()
 
+    fig, axes = plt.subplots(2, 3, figsize=(10, 6))
+    indices = [25, 125, 225]
+    for i, idx in enumerate(indices):
+        axes[0, i].imshow(Y_obs[idx].reshape(64, 64), cmap='gray')
+        axes[1, i].imshow(Y_reconstructed[idx].reshape(64, 64), cmap='gray')
+        axes[0, i].set_title("Original")
+        axes[1, i].set_title("Reconstructed")
+        for ax in axes[:, i]: ax.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+    import matplotlib.patches as patches
+
+    # --- 5. Visualization with Ellipses ---
+    fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+    indices = [25, 125, 225]
+
+    # Extract geometry for the landmarks
+    anc = params['anchors']
+    l11, l21, l22 = params['L_params'][:, 0], params['L_params'][:, 1], params['L_params'][:, 2]
+
+    for i, idx in enumerate(indices):
+        # Plot Original + Landmarks
+        axes[0, i].imshow(Y_obs[idx].reshape(64, 64), cmap='gray', extent=[-1, 1, 1, -1])
+    
+        # Draw each anisotropic landmark as an ellipse
+        for j in range(M_ANCHORS):
+            # The precision matrix is P = L @ L.T
+            # To get the ellipse shape, we look at the Covariance Sigma = P^-1
+            L = jnp.array([[l11[j], 0], [l21[j], l22[j]]])
+            P = L @ L.T
+            Sigma = jnp.linalg.inv(P)
+        
+            # Calculate eigenvalues for width/height and eigenvectors for rotation
+            vals, vecs = jnp.linalg.eigh(Sigma)
+            angle = jnp.degrees(jnp.arctan2(vecs[1, 1], vecs[0, 1]))
+        
+            # We use 2*sqrt(val) to represent ~2 standard deviations
+            width, height = 2 * jnp.sqrt(vals[1]), 2 * jnp.sqrt(vals[0])
+        
+            ellipse = patches.Ellipse(
+                xy=(anc[j, 1], anc[j, 0]), 
+                width=width, height=height, angle=angle,
+                edgecolor='red', facecolor='none', alpha=0.3, lw=0.5
+            )
+            axes[0, i].add_patch(ellipse)
+        
+        axes[0, i].set_title(f"Original {idx} + Landmarks")
+    
+        # Plot Reconstructed
+        axes[1, i].imshow(Y_reconstructed[idx].reshape(64, 64), cmap='gray')
+        axes[1, i].set_title("Reconstructed")
+    
+        for ax in axes[:, i]: 
+            ax.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+    return Y_obs, compute_basis, jnp, m_all, params, plt
+
+
+@app.cell
+def _(Y_obs, compute_basis, jnp, m_all, params, plt):
+    # --- 6. Upscaling to 256x256 ---
+    upscale_res = 512
+    x_range_high = jnp.linspace(-1, 1, upscale_res)
+    # Create a much denser grid
+    coords_high = jnp.stack(jnp.meshgrid(x_range_high, x_range_high, indexing='ij'), axis=-1).reshape(-1, 2)
+
+
+
+    phis_high = compute_basis(coords_high, params['anchors'], params['mixing_weights'], params['L_params'])
+
+
+    # Use the weights (m_all) we already solved for the 64x64 version
+    # This "projects" the low-res weights onto the high-res basis
+    idx_to_plot = 20 #Let's pick one face (e.g., the person with gxlasses)
+    Y_upscaled = (m_all[idx_to_plot] @ phis_high.T).reshape(upscale_res, upscale_res)
+
+    # Compare Original (64x64) vs Upscaled (256x256)
+    _fig, _axes = plt.subplots(1, 2, figsize=(12, 6))
+    _axes[0].imshow(Y_obs[idx_to_plot].reshape(64, 64), cmap='gray', interpolation='nearest')
+    _axes[0].set_title("Original (64x64 Pixels)")
+    _axes[1].imshow(Y_upscaled, cmap='gray')
+    _axes[1].set_title(f"Neural Upscale ({upscale_res}x{upscale_res})")
+    for _ax in _axes: _ax.axis('off')
+    plt.show()
+
+    return
+
+
+@app.cell
+def _(mo):
+    t_slider = mo.ui.slider(start=0, stop=1, step=0.01, value=0.5, label="Morphing Factor")
+    t_slider
+    return (t_slider,)
+
+
+@app.cell(hide_code=True)
+def _(h, jnp, m_n_all, phis_final, plt, t_slider, w):
+    # 2. In a new cell, perform the interpolation and plot
+    # Let's morph between Face 0 and Face 1
+    person_a = m_n_all[45]
+    person_b = m_n_all[100]
+
+    # Interpolate the coefficients
+    mixed_coeffs = (1 - t_slider.value) * person_a + t_slider.value * person_b
+
+    # Reconstruct using the shared basis
+    morphed_face = jnp.dot(mixed_coeffs, phis_final.T).reshape(h, w)
+
+    plt.imshow(morphed_face, cmap='gray')
+    plt.axis('off')
+    plt.title(f"Morphed Face (t={t_slider.value})")
+    plt.show()
+    return
+
+
+@app.cell
+def _():
     return
 
 

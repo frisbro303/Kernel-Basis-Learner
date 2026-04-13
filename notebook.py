@@ -17,8 +17,10 @@ def _():
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
 
+    model_path = mo.notebook_location() / "model.npz"
+
     # 1. Load your saved parameters
-    data = np.load("model.npz")
+    data = np.load(model_path)
     params = {
         'anchors': data['anchors'],
         'mixing_weights': data['mixing_weights'],

@@ -25,8 +25,16 @@ def _():
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
 
-    # 1. Load your saved parameters
-    data = np.load("model.npz")
+    import io  # Add this import
+
+
+    model_path = mo.notebook_location() / "model.npz"
+
+    # Use a buffer to bridge the WASM file system and numpy
+    with open(model_path, "rb") as f:
+        buffer = io.BytesIO(f.read())
+        data = np.load(buffer)
+
     params = {
         'anchors': data['anchors'],
         'mixing_weights': data['mixing_weights'],

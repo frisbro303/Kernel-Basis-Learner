@@ -28,12 +28,12 @@ jobs:
 
       - name: 📄 Export notebook and copy data
         run: |
-          marimo export html-wasm notebook.py -o dist --mode edit --show-code
+          marimo export html-wasm notebook.py -o static --mode edit --show-code
 
       - name: 📦 Upload Pages Artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: static
 
   deploy:
     needs: build
